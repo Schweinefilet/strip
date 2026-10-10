@@ -54,7 +54,8 @@ const STEPS = [
 const STYLES = [0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,
                 0x0C,0x0D,0x0E,0x0F,0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x65,0x66];
 
-const SERVICE = 0xffff, WRITE = 0xff01;
+const SERVICE = "0000ffff-0000-1000-8000-00805f9b34fb";
+const WRITE = "0000ff01-0000-1000-8000-00805f9b34fb";
 let ch = null, seq = 0, running = false;
 const $ = id => document.getElementById(id);
 const say = t => $("msg").textContent = t;
@@ -85,10 +86,14 @@ function solidWhite(segments = 20) {
   for (let i = 0; i < segments; i++) c.push(0xA1, 0, 0, BRIGHTNESS);
   return wrap(c);
 }
-async function write(bytes) {
-  if (ch.writeValueWithResponse) return ch.writeValueWithResponse(bytes);
-  return ch.writeValue(bytes);
+function withTimeout(promise, ms, label) {
+  return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error(label + " timed out")), ms))]);
 }
+async function write(bytes) {
+  const op = ch.writeValueWithResponse ? ch.writeValueWithResponse(bytes) : ch.writeValue(bytes);
+  return withTimeout(op, 4000, "Write");
+}
+const errText = e => ((e && e.name) || "Error") + ": " + ((e && e.message) || "(no message)");
 
 function progress(ms) {
   const fill = $("fill");
@@ -110,29 +115,42 @@ async function play() {
     await write(solidWhite());
     say("Lit. You can close this.");
   } catch (e) {
-    say("Lost the connection: " + e.message);
+    say("Failed while sending. " + errText(e));
   }
   running = false; $("go").classList.remove("busy");
 }
 
 async function attach(device) {
   device.addEventListener("gattserverdisconnected", () => { ch = null; say("Disconnected. Tap to reconnect."); });
-  say("Connecting…");
-  const server = await device.gatt.connect();
-  const svc = await server.getPrimaryService(SERVICE);
-  ch = await svc.getCharacteristic(WRITE);
+  say("Connecting to " + (device.name || "device") + "…");
+  const server = await withTimeout(device.gatt.connect(), 10000, "Connect");
+  say("Connected. Finding service…");
+  const svc = await withTimeout(server.getPrimaryService(SERVICE), 6000, "Service lookup");
+  ch = await withTimeout(svc.getCharacteristic(WRITE), 6000, "Characteristic lookup");
+  say("Ready. Playing…");
   await play();
 }
 
 async function pickAndGo() {
   if (ch) return play();
   if (!navigator.bluetooth) { say("No Bluetooth in this browser. Open this page in Bluefy."); return; }
+  say("Opening device picker…");
+  let device;
   try {
-    const device = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: "IOTBT" }], optionalServices: [SERVICE] });
-    await attach(device);
+    device = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: "IOTBT" }], optionalServices: [SERVICE] });
   } catch (e) {
-    if (e.name !== "NotFoundError") say(e.message);
+    if (e.name === "NotFoundError" && /cancel/i.test(e.message || "")) { say("Picker closed."); return; }
+    // Some browsers reject the name filter. Fall back to showing every device.
+    try {
+      say("Filter failed (" + errText(e) + "). Showing all devices…");
+      device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [SERVICE] });
+    } catch (e2) {
+      say("Picker failed. " + errText(e2));
+      return;
+    }
   }
+  try { await attach(device); }
+  catch (e) { ch = null; say("Connection failed. " + errText(e)); }
 }
 
 // Reconnect to a remembered controller without a tap, if the browser allows it.
@@ -141,13 +159,13 @@ async function autoStart() {
   try {
     const known = (await navigator.bluetooth.getDevices()).find(d => (d.name || "").startsWith("IOTBT"));
     if (known) await attach(known);
-  } catch (e) { say("Tap Light up."); }
+  } catch (e) { ch = null; say("Auto-connect failed, tap Light up. " + errText(e)); }
 }
 
 $("go").addEventListener("click", pickAndGo);
 $("again").addEventListener("click", () => ch ? play() : pickAndGo());
 $("off").addEventListener("click", async () => { if (ch) { await write(power(false)); $("fill").style.width = "0"; say("Off."); } });
-say(navigator.bluetooth ? "Ready (v2). Close ZENGGE, then tap Light up." : "Ready (v2), but this browser has no Bluetooth.");
+say(navigator.bluetooth ? "Ready (v3). Close ZENGGE, then tap Light up." : "Ready (v3), but this browser has no Bluetooth.");
 setTimeout(autoStart, 500);
 </script>
 </body>
