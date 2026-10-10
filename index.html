@@ -16,9 +16,8 @@
     font: 600 24px/1 inherit; letter-spacing: 0.02em; cursor: pointer; }
   #go:active { transform: scale(0.97); }
   #go.busy { border-color: #fff; box-shadow: 0 0 40px rgba(255,255,255,0.25); }
-  #bar { display: flex; gap: 3px; width: min(78vw, 300px); height: 8px; }
-  #bar span { flex: 1; border-radius: 2px; background: #1a1a1a; transition: background 0.1s; }
-  #bar span.on { background: #fff; }
+  #track { width: min(78vw, 300px); height: 6px; border-radius: 3px; background: #1a1a1a; overflow: hidden; }
+  #fill { height: 100%; width: 0; background: #fff; }
   #msg { color: var(--dim); font-size: 15px; text-align: center; max-width: 320px; min-height: 2.8em; }
   .row { display: flex; gap: 10px; }
   .row button { font: inherit; font-size: 15px; color: var(--text); background: #141414;
@@ -28,7 +27,7 @@
 <body>
 <main>
   <button id="go">Light up</button>
-  <div id="bar"></div>
+  <div id="track"><div id="fill"></div></div>
   <div id="msg">Close ZENGGE first.</div>
   <div class="row">
     <button id="again">Replay</button>
@@ -38,16 +37,22 @@
 
 <script>
 // ---- Settings ----
-const BRIGHTNESS = 50;     // percent, steady state and wipe
-const SEGMENTS = 20;       // resolution of the wipe
-const WIPE_MS = 2000;      // total wipe time
-const REVERSE = false;     // flip if it fills back to front
+const BRIGHTNESS = 50;   // percent, for the animations and the steady white
+// Each step: [style number from the explorer, variant, seconds, speed 1-100]
+const STEPS = [
+  [18, 0, 7,   50],
+  [9,  0, 0.8, 10],
+];
+
+// Explorer's style number -> the controller's style byte
+const STYLES = [0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,
+                0x0C,0x0D,0x0E,0x0F,0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x65,0x66];
 
 const SERVICE = 0xffff, WRITE = 0xff01;
 let ch = null, seq = 0, running = false;
 const $ = id => document.getElementById(id);
 const say = t => $("msg").textContent = t;
-$("bar").innerHTML = "<span></span>".repeat(SEGMENTS);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function wrap(cmd) {
   seq = (seq + 1) & 0xFF;
@@ -59,40 +64,41 @@ function power(on) {
   c.push(c.reduce((a, b) => a + b, 0) & 0xFF);
   return wrap(c);
 }
-function frame(litSet) {
-  const c = [0xE1, 0x03, 0x00, SEGMENTS, 0x00, 0x00, SEGMENTS];
-  for (let i = 0; i < SEGMENTS; i++) c.push(0xA1, 0, 0, litSet.has(i) ? BRIGHTNESS : 1);
+function scene(index, variant, speed) {
+  const palette = [[0x00, 0x00, BRIGHTNESS], [0x00, 0x00, 1]];
+  const c = [0xE1, 0x01, 0x00, 0x64, STYLES[index - 1], variant, 0x01, 0x64,
+             Math.max(1, Math.min(100, speed)), 0x00, 0xA1, 0x00, 0x00, 0x00, palette.length];
+  for (const p of palette) c.push(0xA1, ...p);
   return wrap(c);
 }
-// Wait for each write to be acknowledged so frames can't pile up and get dropped.
+function solidWhite(segments = 20) {
+  const c = [0xE1, 0x03, 0x00, segments, 0x00, 0x00, segments];
+  for (let i = 0; i < segments; i++) c.push(0xA1, 0, 0, BRIGHTNESS);
+  return wrap(c);
+}
 async function write(bytes) {
   if (ch.writeValueWithResponse) return ch.writeValueWithResponse(bytes);
   return ch.writeValue(bytes);
 }
-const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-function showBar(lit) {
-  [...$("bar").children].forEach((s, i) => s.classList.toggle("on", lit.has(i)));
+function progress(ms) {
+  const fill = $("fill");
+  fill.style.transition = "none"; fill.style.width = "0";
+  fill.offsetWidth; // restart the bar
+  fill.style.transition = `width ${ms}ms linear`; fill.style.width = "100%";
 }
 
-async function wipe() {
+async function play() {
   if (!ch || running) return;
   running = true; $("go").classList.add("busy"); say("");
   try {
     await write(power(true));
-    const order = [...Array(SEGMENTS).keys()];
-    if (REVERSE) order.reverse();
-    const lit = new Set();
-    const step = WIPE_MS / SEGMENTS;
-    for (const i of order) {
-      const t0 = performance.now();
-      lit.add(i);
-      showBar(lit);
-      await write(frame(lit));
-      const left = step - (performance.now() - t0);
-      if (left > 0) await sleep(left);
+    progress(STEPS.reduce((t, s) => t + s[2] * 1000, 0));
+    for (const [index, variant, seconds, speed] of STEPS) {
+      await write(scene(index, variant, speed));
+      await sleep(seconds * 1000);
     }
-    await write(frame(lit)); // final solid white, sent once more to be sure
+    await write(solidWhite());
     say("Lit. You can close this.");
   } catch (e) {
     say("Lost the connection: " + e.message);
@@ -106,11 +112,11 @@ async function attach(device) {
   const server = await device.gatt.connect();
   const svc = await server.getPrimaryService(SERVICE);
   ch = await svc.getCharacteristic(WRITE);
-  await wipe();
+  await play();
 }
 
 async function pickAndGo() {
-  if (ch) return wipe();
+  if (ch) return play();
   if (!navigator.bluetooth) { say("No Bluetooth in this browser. Open this page in Bluefy."); return; }
   try {
     const device = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: "IOTBT" }], optionalServices: [SERVICE] });
@@ -120,7 +126,7 @@ async function pickAndGo() {
   }
 }
 
-// Try to reconnect to a remembered controller with no tap. Falls back to the button.
+// Reconnect to a remembered controller without a tap, if the browser allows it.
 async function autoStart() {
   if (!navigator.bluetooth || !navigator.bluetooth.getDevices) return;
   try {
@@ -130,8 +136,8 @@ async function autoStart() {
 }
 
 $("go").onclick = pickAndGo;
-$("again").onclick = () => ch ? wipe() : pickAndGo();
-$("off").onclick = async () => { if (ch) { await write(power(false)); showBar(new Set()); say("Off."); } };
+$("again").onclick = () => ch ? play() : pickAndGo();
+$("off").onclick = async () => { if (ch) { await write(power(false)); $("fill").style.width = "0"; say("Off."); } };
 autoStart();
 </script>
 </body>
