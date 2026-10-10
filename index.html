@@ -13,7 +13,7 @@
     justify-content: center; gap: 28px; padding: 24px 16px; }
   #go { width: min(78vw, 300px); aspect-ratio: 1; border-radius: 50%; border: 2px solid #333;
     background: radial-gradient(circle, #1c1c1c, #0a0a0a); color: var(--text);
-    font: 600 24px/1 inherit; letter-spacing: 0.02em; cursor: pointer; }
+    font-family: inherit; font-size: 24px; font-weight: 600; letter-spacing: 0.02em; cursor: pointer; }
   #go:active { transform: scale(0.97); }
   #go.busy { border-color: #fff; box-shadow: 0 0 40px rgba(255,255,255,0.25); }
   #track { width: min(78vw, 300px); height: 6px; border-radius: 3px; background: #1a1a1a; overflow: hidden; }
@@ -28,13 +28,19 @@
 <main>
   <button id="go">Light up</button>
   <div id="track"><div id="fill"></div></div>
-  <div id="msg">Close ZENGGE first.</div>
+  <div id="msg">Loading… if this never changes, the script did not run.</div>
   <div class="row">
     <button id="again">Replay</button>
     <button id="off">Off</button>
   </div>
 </main>
 
+<script>
+window.onerror = function (m, src, line) {
+  var el = document.getElementById("msg");
+  if (el) el.textContent = "Error: " + m + " (line " + line + ")";
+};
+</script>
 <script>
 // ---- Settings ----
 const BRIGHTNESS = 50;   // percent, for the animations and the steady white
@@ -57,7 +63,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 function wrap(cmd) {
   seq = (seq + 1) & 0xFF;
   const n = cmd.length;
-  return new Uint8Array([0x00, seq, 0x80, 0x00, n >> 8, n & 0xFF, (n + 1) & 0xFF, 0x0B, ...cmd]);
+  const out = new Uint8Array(8 + n);
+  out.set([0x00, seq, 0x80, 0x00, n >> 8, n & 0xFF, (n + 1) & 0xFF, 0x0B]);
+  out.set(cmd, 8);
+  return out;
 }
 function power(on) {
   const c = [0x3B, on ? 0x23 : 0x24, 0, 0, 0, 0, 0, 0, 0, 0x32, 0, 0];
@@ -68,7 +77,7 @@ function scene(index, variant, speed) {
   const palette = [[0x00, 0x00, BRIGHTNESS], [0x00, 0x00, 1]];
   const c = [0xE1, 0x01, 0x00, 0x64, STYLES[index - 1], variant, 0x01, 0x64,
              Math.max(1, Math.min(100, speed)), 0x00, 0xA1, 0x00, 0x00, 0x00, palette.length];
-  for (const p of palette) c.push(0xA1, ...p);
+  for (const p of palette) c.push(0xA1, p[0], p[1], p[2]);
   return wrap(c);
 }
 function solidWhite(segments = 20) {
@@ -132,13 +141,14 @@ async function autoStart() {
   try {
     const known = (await navigator.bluetooth.getDevices()).find(d => (d.name || "").startsWith("IOTBT"));
     if (known) await attach(known);
-  } catch { say("Tap Light up."); }
+  } catch (e) { say("Tap Light up."); }
 }
 
-$("go").onclick = pickAndGo;
-$("again").onclick = () => ch ? play() : pickAndGo();
-$("off").onclick = async () => { if (ch) { await write(power(false)); $("fill").style.width = "0"; say("Off."); } };
-autoStart();
+$("go").addEventListener("click", pickAndGo);
+$("again").addEventListener("click", () => ch ? play() : pickAndGo());
+$("off").addEventListener("click", async () => { if (ch) { await write(power(false)); $("fill").style.width = "0"; say("Off."); } });
+say(navigator.bluetooth ? "Ready (v2). Close ZENGGE, then tap Light up." : "Ready (v2), but this browser has no Bluetooth.");
+setTimeout(autoStart, 500);
 </script>
 </body>
 </html>
